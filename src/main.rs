@@ -96,28 +96,24 @@ fn promote_leptos() -> Pieces {
 }
 
 struct MoveTracker {
+    piece_info: PieceInfo,
     position: Position,
     update_position: Option<WriteSignal<Position>>,
-    piece_info: Option<PieceInfo>,
     moves: Option<HashMap<BoardIdxs, String>>,
 }
 
 impl MoveTracker {
-    pub fn new(position: Position) -> MoveTracker {
+    pub fn new(piece_info: PieceInfo, position: Position) -> MoveTracker {
         MoveTracker {
+            piece_info,
             position,
             update_position: None,
-            piece_info: None,
             moves: None,
         }
     }
 
     pub fn set_update_fn(&mut self, update_fn: WriteSignal<Position>) {
         self.update_position = Some(update_fn);
-    }
-
-    pub fn set_piece_info(&mut self, piece_info: PieceInfo) {
-        self.piece_info = Some(piece_info);
     }
 
     pub fn update_position(&mut self, new_position: Position) {
@@ -153,65 +149,47 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
     let mut board_view = Vec::new();
     let mut piece_view = Vec::new();
 
-    let use_white_perspective = perspective() == Color::White;
-
-    let mut rank = if use_white_perspective {
-        BOARD_LEN - 1
-    } else {
-        0
-    };
-    let rank_inc: isize = if use_white_perspective { -1 } else { 1 };
-    let starting_file = if use_white_perspective {
-        0
-    } else {
-        BOARD_LEN - 1
-    };
-    let file_inc: isize = if use_white_perspective { 1 } else { -1 };
+    let mut rank = BOARD_LEN - 1;
+    let starting_file = 0;
 
     while rank < BOARD_LEN {
         let mut file_ = starting_file;
 
         let mut row_view = Vec::new();
         while file_ < BOARD_LEN {
-            let square_occupant = &board.borrow().squares[rank][file_];
-            let (square_str, text_color) = match square_occupant {
-                Some(piece_info) => {
-                    let piece_str = match piece_info.piece {
-                        Pieces::K => "♚",
-                        Pieces::Q => "♛",
-                        Pieces::R => "♜",
-                        Pieces::B => "♝",
-                        Pieces::N => "♞",
-                        Pieces::P => "♟",
-                    };
-                    let text_color = if piece_info.color == Color::White {
-                        "#FFF"
-                    } else {
-                        "#000"
-                    };
-                    (piece_str, text_color)
-                }
-                None => (" ", "#000"),
-            };
+            /* Create square */
             let square_color = if (rank + file_) % 2 == 0 {
                 "#7f682f"
             } else {
                 "#d6c291"
             };
             let th_style = format!("background: {}; height: 50px; width: 50px", square_color);
-
             row_view.push(view! { <th style=th_style/> });
 
+            // create piece if one starts on this square
+            let square_occupant = &board.borrow().squares[rank][file_];
             if square_occupant.is_none() {
-                file_ = file_.wrapping_add_signed(file_inc);
+                file_ = file_.wrapping_add_signed(1);
                 continue;
             }
-
+            let piece_info = square_occupant.unwrap();
+            let piece_str = match piece_info.piece {
+                Pieces::K => "♚",
+                Pieces::Q => "♛",
+                Pieces::R => "♜",
+                Pieces::B => "♝",
+                Pieces::N => "♞",
+                Pieces::P => "♟",
+            };
+            let text_color = if piece_info.color == Color::White {
+                "#FFF"
+            } else {
+                "#000"
+            };
             let piece_div_style = format!("color: {}; font-size: 60px; ", text_color);
 
-            let el = create_node_ref::<Div>();
-
             let mt_og = Rc::new(RefCell::new(MoveTracker::new(
+                piece_info,
                 get_position_from_board_idxs(BoardIdxs(rank, file_)),
             )));
             let mt_clone_on_start = Rc::clone(&mt_og);
@@ -220,6 +198,7 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
             let board_clone_on_start = Rc::clone(&board);
             let board_clone_on_end = Rc::clone(&board);
 
+            let el = create_node_ref::<Div>();
             // `style` is a helper string "left: {x}px; top: {y}px;"
             let UseDraggableReturn {
                 set_position,
@@ -236,10 +215,8 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                         let board_idxs = get_board_idxs_from_position(mt.position);
                         let BoardIdxs(rank_idx, file_idx) = board_idxs;
                         log!(format!("ON START, {}, {}", rank_idx, file_idx));
-                        let piece_info = board_clone.squares[rank_idx][file_idx];
 
-                        if let Some(piece_info) = piece_info {
-                            mt.set_piece_info(piece_info);
+                        if board_clone.squares[rank_idx][file_idx].is_some() {
                             let legal_moves = board_clone.get_moves_for_piece_at(board_idxs);
                             log!(format!("moves: {:?}", legal_moves));
                             mt.set_legal_moves(legal_moves);
@@ -258,7 +235,7 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                             if let Some(move_string) = moves.get(&board_idxs).clone() {
                                 log!(move_string.clone());
 
-                                let piece_color = mt.piece_info.unwrap().color;
+                                let piece_color = mt.piece_info.color;
 
                                 let move_ = match parse_move(move_string.to_owned(), piece_color) {
                                     Ok(move_) => move_,
@@ -290,17 +267,22 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
 
             mt_og.borrow_mut().set_update_fn(set_position);
 
+            // TODO move mt_og into a vec
+
             piece_view.push(view! {
-                    <div node_ref=el style=move || format!("position: fixed; {}; {}", style.get(), piece_div_style)>
-                         {square_str}
-                    </div>
+                <div node_ref=el style=move || format!("position: fixed; {}; {}", style.get(), piece_div_style)>
+                    {piece_str}
+                </div>
             });
 
-            file_ = file_.wrapping_add_signed(file_inc);
+            file_ = file_.wrapping_add_signed(1);
         }
 
+        // TODO create_effect that calls some function on each mt_og which 1) flips its position
+        // and 2) correct the update function
+
         board_view.push(view! { <tr>{row_view}</tr> });
-        rank = rank.wrapping_add_signed(rank_inc);
+        rank = rank.wrapping_add_signed(-1);
     }
 
     view! {
