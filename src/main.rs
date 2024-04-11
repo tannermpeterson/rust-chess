@@ -94,20 +94,22 @@ fn promote_leptos() -> Pieces {
     Pieces::Q
 }
 
-struct MoveTracker {
+struct PieceTracker {
     piece_info: PieceInfo,
     position: Position,
     perspective: Color,
+    is_visible: bool,
     update_fn: Option<WriteSignal<Position>>,
     moves: Option<HashMap<BoardIdxs, String>>,
 }
 
-impl MoveTracker {
-    pub fn new(piece_info: PieceInfo, position: Position, perspective: Color) -> MoveTracker {
-        MoveTracker {
+impl PieceTracker {
+    pub fn new(piece_info: PieceInfo, position: Position, perspective: Color) -> PieceTracker {
+        PieceTracker {
             piece_info,
             position,
             perspective,
+            is_visible: true,
             update_fn: None,
             moves: None,
         }
@@ -119,11 +121,12 @@ impl MoveTracker {
 
     pub fn update_position(&mut self, new_position: Position) {
         self.position = new_position;
-        self.set_position()
+        self.reset_position()
     }
 
-    pub fn set_position(&mut self) {
-        if let Some(update_fn) = &mut self.update_fn {
+    pub fn reset_position(&mut self) {
+        log!("!!!");
+        if let Some(update_fn) = self.update_fn {
             update_fn(self.position);
         }
     }
@@ -137,6 +140,10 @@ impl MoveTracker {
             self.update_position(flip_position(self.position));
         }
         self.perspective = perspective;
+    }
+
+    pub fn visibility(&self) -> String {
+        String::from(if self.is_visible { "visible" } else { "hidden" })
     }
 }
 
@@ -156,6 +163,8 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
     let mut board_view = Vec::new();
     let mut piece_view = Vec::new();
 
+    let piece_trackers = Rc::new(RefCell::new(Vec::<Rc<RefCell<PieceTracker>>>::new()));
+
     let mut rank = BOARD_LEN - 1;
     let starting_file = 0;
 
@@ -173,12 +182,13 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
             let th_style = format!("background: {}; height: 50px; width: 50px", square_color);
             row_view.push(view! { <th style=th_style/> });
 
-            // create piece if one starts on this square
+            /* Create piece if one starts on this square */
             let square_occupant = &board.borrow().squares[rank][file_];
             if square_occupant.is_none() {
                 file_ = file_.wrapping_add_signed(1);
                 continue;
             }
+
             let piece_info = square_occupant.unwrap();
             let piece_str = match piece_info.piece {
                 Pieces::K => "♚",
@@ -195,16 +205,18 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
             };
             let piece_div_style = format!("color: {}; font-size: 60px; ", text_color);
 
-            let mt_og = Rc::new(RefCell::new(MoveTracker::new(
+            let pt_og = Rc::new(RefCell::new(PieceTracker::new(
                 piece_info,
                 get_position_from_board_idxs(BoardIdxs(rank, file_), perspective.get_untracked()),
                 perspective.get_untracked(),
             )));
-            let mt_clone_on_start = Rc::clone(&mt_og);
-            let mt_clone_on_end = Rc::clone(&mt_og);
+            let pt_clone_on_start = Rc::clone(&pt_og);
+            let pt_clone_on_end = Rc::clone(&pt_og);
 
             let board_clone_on_start = Rc::clone(&board);
             let board_clone_on_end = Rc::clone(&board);
+
+            let pts_clone_on_end = Rc::clone(&piece_trackers);
 
             let el = create_node_ref::<Div>();
             // `style` is a helper string "left: {x}px; top: {y}px;"
@@ -215,82 +227,98 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
             } = use_draggable_with_options(
                 el,
                 UseDraggableOptions::default()
-                    .initial_value(mt_og.borrow().position)
+                    .initial_value(pt_og.borrow().position)
                     .on_start(move |UseDraggableCallbackArgs { position, event }| {
-                        let mut mt = mt_clone_on_start.borrow_mut();
+                        let mut pt = pt_clone_on_start.borrow_mut();
                         let board_clone = board_clone_on_start.borrow();
-                        log!(format!("{}, {}", mt.position.x, mt.position.y));
-                        let board_idxs = get_board_idxs_from_position(mt.position, mt.perspective);
+                        log!(format!("{}, {}", pt.position.x, pt.position.y));
+                        let board_idxs = get_board_idxs_from_position(pt.position, pt.perspective);
                         let BoardIdxs(rank_idx, file_idx) = board_idxs;
                         log!(format!("ON START, {}, {}", rank_idx, file_idx));
 
                         if board_clone.squares[rank_idx][file_idx].is_some() {
                             let legal_moves = board_clone.get_moves_for_piece_at(board_idxs);
                             log!(format!("moves: {:?}", legal_moves));
-                            mt.set_legal_moves(legal_moves);
+                            pt.set_legal_moves(legal_moves);
                             true
                         } else {
                             false
                         }
                     })
+                    // TODO disallow dragging outside of board
                     .on_end(move |UseDraggableCallbackArgs { position, event }| {
-                        let mut mt = mt_clone_on_end.borrow_mut();
+                        let mut pt = pt_clone_on_end.borrow_mut();
+                        pt.reset_position();
+                        return;
 
-                        let board_idxs = get_board_idxs_from_position(position, mt.perspective);
+                        let board_idxs = get_board_idxs_from_position(position, pt.perspective);
                         log!(format!(
                             "({}, {}), ({}, {})",
                             position.x, position.y, board_idxs.0, board_idxs.1
                         ));
 
-                        if let Some(moves) = mt.moves.as_ref() {
+                        if let Some(moves) = pt.moves.as_ref() {
                             if let Some(move_string) = moves.get(&board_idxs).clone() {
                                 log!(move_string.clone());
 
-                                let piece_color = mt.piece_info.color;
+                                let piece_color = pt.piece_info.color;
 
                                 let move_ = match parse_move(move_string.to_owned(), piece_color) {
                                     Ok(move_) => move_,
                                     Err(e) => {
                                         log!(format!("{}", e));
-                                        mt.set_position();
+                                        pt.reset_position();
                                         return;
                                     }
                                 };
-                                let res = board_clone_on_end
-                                    .borrow_mut()
-                                    .handle_move(move_, piece_color);
+
+                                let mut board = board_clone_on_end.borrow_mut();
+                                let res = board.handle_move(move_, piece_color);
                                 if let Err(e) = res {
                                     log!(format!("{}", e));
-                                    mt.set_position();
+                                    pt.reset_position();
                                     return;
                                 }
                                 let new_pos =
-                                    get_position_from_board_idxs(board_idxs, mt.perspective);
-                                mt.update_position(new_pos);
+                                    get_position_from_board_idxs(board_idxs, pt.perspective);
+
+                                // update any other pieces that may have been affected by this move
+                                if let Some(capture_idxs) = &res.unwrap().capture_idxs {
+                                    for pt_ in pts_clone_on_end.borrow().iter() {
+                                        let mut pt_ = match pt_.try_borrow_mut() {
+                                            Err(_) => continue,
+                                            Ok(pt_) => pt_,
+                                        };
+                                        if get_board_idxs_from_position(pt.position, pt.perspective)
+                                            == *capture_idxs
+                                        {
+                                            pt_.is_visible = false;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                pt.update_position(new_pos);
                             } else {
                                 log!(format!("Move not found"));
-                                mt.set_position();
+                                pt.reset_position();
                             }
                         } else {
                             log!(format!("No moves found"));
-                            mt.set_position();
+                            pt.reset_position();
                         }
                     }),
             );
+            pt_og.borrow_mut().set_update_fn(set_position);
 
-            mt_og.borrow_mut().set_update_fn(set_position);
-
-            // TODO move mt_og into a vec
-
-            create_effect(move |_| {
-                mt_og.borrow_mut().set_perspective(perspective());
-            });
-
+            let pt_clone_view = Rc::clone(&pt_og);
             piece_view.push(view! {
-                <div node_ref=el style=move || format!("position: fixed; {}; {}", style.get(), piece_div_style)>
+                <div node_ref=el style=move || format!("position: fixed; visibility: {}; {}; {};", pt_clone_view.borrow().visibility(), style(), piece_div_style)>
                     {piece_str}
                 </div>
             });
+
+            piece_trackers.borrow_mut().push(pt_og);
 
             file_ = file_.wrapping_add_signed(1);
         }
@@ -298,6 +326,12 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
         board_view.push(view! { <tr>{row_view}</tr> });
         rank = rank.wrapping_add_signed(-1);
     }
+
+    create_effect(move |_| {
+        piece_trackers.borrow().iter().for_each(|pt| {
+            pt.borrow_mut().set_perspective(perspective());
+        });
+    });
 
     view! {
         <table>
@@ -418,7 +452,7 @@ mod board {
         move_: Move,
         capture: Option<Pieces>,
         promotion: Option<Pieces>,
-        target_idxs: BoardIdxs,
+        move_idxs: MoveIdxs,
     }
 
     pub const BOARD_LEN: usize = 8;
@@ -454,19 +488,19 @@ mod board {
             }
         }
 
-        pub fn handle_move(&mut self, move_: Move, color: Color) -> Result<(), MoveErrors> {
+        pub fn handle_move(&mut self, move_: Move, color: Color) -> Result<&MoveIdxs, MoveErrors> {
             let mut capture: Option<Pieces> = None;
             let mut new_king_idxs: Option<BoardIdxs> = None;
             let mut promotion: Option<Pieces> = None;
-            let mut target_idxs_for_record: Option<BoardIdxs> = None;
+            let mut move_idxs_for_record: Option<MoveIdxs> = None;
             match move_ {
                 Move::Standard(ref move_) => {
                     let move_idxs = self.is_legal_move(&move_, color)?;
 
                     let MoveIdxs {
-                        starting_idxs,
-                        target_idxs,
-                        capture_idxs,
+                        ref starting_idxs,
+                        ref target_idxs,
+                        ref capture_idxs,
                     } = move_idxs;
 
                     // The piece being moved should never be None, so ok to unwrap here
@@ -496,15 +530,15 @@ mod board {
                         new_king_idxs = Some(target_idxs.clone())
                     };
 
-                    target_idxs_for_record = Some(target_idxs);
+                    move_idxs_for_record = Some(move_idxs);
                 }
                 Move::Castle(ref direction) => {
                     let move_idxs_arr = self.is_legal_castle(&direction, color)?;
 
                     for move_idxs in move_idxs_arr.into_iter() {
                         let MoveIdxs {
-                            starting_idxs,
-                            target_idxs,
+                            ref starting_idxs,
+                            ref target_idxs,
                             capture_idxs: _,
                         } = move_idxs;
 
@@ -516,7 +550,7 @@ mod board {
                         self.squares[starting_idxs.0][starting_idxs.1] = None;
                         if piece_moved.piece == Pieces::K {
                             new_king_idxs = Some(target_idxs.clone());
-                            target_idxs_for_record = Some(target_idxs);
+                            move_idxs_for_record = Some(move_idxs);
                         };
                     }
                 }
@@ -526,14 +560,14 @@ mod board {
                 move_,
                 capture,
                 promotion,
-                target_idxs: target_idxs_for_record.unwrap(),
+                move_idxs: move_idxs_for_record.unwrap(),
             });
 
             if let Some(idxs) = new_king_idxs {
                 self.king_idxs.entry(color).and_modify(|e| *e = idxs);
             };
 
-            Ok(())
+            Ok(&self.moves.last().unwrap().move_idxs)
         }
 
         pub fn to_string(&self, perspective: Color) -> String {
@@ -1066,7 +1100,7 @@ mod board {
         fn prev_move_target_idxs(&self) -> Option<&BoardIdxs> {
             self.moves
                 .last()
-                .and_then(|move_record| Some(&move_record.target_idxs))
+                .and_then(|move_record| Some(&move_record.move_idxs.target_idxs))
         }
 
         fn piece_rank(color: Color) -> BoardRank {
