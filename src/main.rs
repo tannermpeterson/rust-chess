@@ -87,7 +87,6 @@ fn promote_text_based() -> Pieces {
 
 fn run_game_leptos(user_color: Color, mut board: Board) {
     mount_to_body(move || view! {<Display board=board user_color=user_color/>})
-    // mount_to_body(|| view! { <p>"Hello, world!"</p> });
 }
 
 fn promote_leptos() -> Pieces {
@@ -98,22 +97,24 @@ fn promote_leptos() -> Pieces {
 struct MoveTracker {
     piece_info: PieceInfo,
     position: Position,
-    update_position: Option<WriteSignal<Position>>,
+    perspective: Color,
+    update_fn: Option<WriteSignal<Position>>,
     moves: Option<HashMap<BoardIdxs, String>>,
 }
 
 impl MoveTracker {
-    pub fn new(piece_info: PieceInfo, position: Position) -> MoveTracker {
+    pub fn new(piece_info: PieceInfo, position: Position, perspective: Color) -> MoveTracker {
         MoveTracker {
             piece_info,
             position,
-            update_position: None,
+            perspective,
+            update_fn: None,
             moves: None,
         }
     }
 
     pub fn set_update_fn(&mut self, update_fn: WriteSignal<Position>) {
-        self.update_position = Some(update_fn);
+        self.update_fn = Some(update_fn);
     }
 
     pub fn update_position(&mut self, new_position: Position) {
@@ -122,23 +123,29 @@ impl MoveTracker {
     }
 
     pub fn set_position(&mut self) {
-        if let Some(update_fn) = &mut self.update_position {
-            update_fn(self.position.clone());
+        if let Some(update_fn) = &mut self.update_fn {
+            update_fn(self.position);
         }
     }
 
     pub fn set_legal_moves(&mut self, moves: HashMap<BoardIdxs, String>) {
         self.moves = Some(moves);
     }
+
+    pub fn set_perspective(&mut self, perspective: Color) {
+        if perspective != self.perspective {
+            self.update_position(flip_position(self.position));
+        }
+        self.perspective = perspective;
+    }
 }
 
 #[component]
 fn Display(board: Board, user_color: Color) -> impl IntoView {
     let (perspective, set_perspective) = create_signal(user_color);
-    // TODO add a button to flip the perspective
     view! {
         <BoardView board=board perspective=perspective/>
-        <button on:click=move |_| set_perspective(perspective().other())>"Flip (doesn't work)"</button>
+        <button on:click=move |_| set_perspective(perspective().other())>"Flip"</button>
     }
 }
 
@@ -190,7 +197,8 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
 
             let mt_og = Rc::new(RefCell::new(MoveTracker::new(
                 piece_info,
-                get_position_from_board_idxs(BoardIdxs(rank, file_)),
+                get_position_from_board_idxs(BoardIdxs(rank, file_), perspective.get_untracked()),
+                perspective.get_untracked(),
             )));
             let mt_clone_on_start = Rc::clone(&mt_og);
             let mt_clone_on_end = Rc::clone(&mt_og);
@@ -207,12 +215,12 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
             } = use_draggable_with_options(
                 el,
                 UseDraggableOptions::default()
-                    .initial_value(mt_og.borrow().position.clone())
+                    .initial_value(mt_og.borrow().position)
                     .on_start(move |UseDraggableCallbackArgs { position, event }| {
                         let mut mt = mt_clone_on_start.borrow_mut();
                         let board_clone = board_clone_on_start.borrow();
                         log!(format!("{}, {}", mt.position.x, mt.position.y));
-                        let board_idxs = get_board_idxs_from_position(mt.position);
+                        let board_idxs = get_board_idxs_from_position(mt.position, mt.perspective);
                         let BoardIdxs(rank_idx, file_idx) = board_idxs;
                         log!(format!("ON START, {}, {}", rank_idx, file_idx));
 
@@ -226,10 +234,13 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                         }
                     })
                     .on_end(move |UseDraggableCallbackArgs { position, event }| {
-                        log!(format!("{}, {}", position.x, position.y));
-                        let board_idxs = get_board_idxs_from_position(position);
-
                         let mut mt = mt_clone_on_end.borrow_mut();
+
+                        let board_idxs = get_board_idxs_from_position(position, mt.perspective);
+                        log!(format!(
+                            "({}, {}), ({}, {})",
+                            position.x, position.y, board_idxs.0, board_idxs.1
+                        ));
 
                         if let Some(moves) = mt.moves.as_ref() {
                             if let Some(move_string) = moves.get(&board_idxs).clone() {
@@ -253,7 +264,9 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                                     mt.set_position();
                                     return;
                                 }
-                                mt.update_position(get_position_from_board_idxs(board_idxs));
+                                let new_pos =
+                                    get_position_from_board_idxs(board_idxs, mt.perspective);
+                                mt.update_position(new_pos);
                             } else {
                                 log!(format!("Move not found"));
                                 mt.set_position();
@@ -269,6 +282,10 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
 
             // TODO move mt_og into a vec
 
+            create_effect(move |_| {
+                mt_og.borrow_mut().set_perspective(perspective());
+            });
+
             piece_view.push(view! {
                 <div node_ref=el style=move || format!("position: fixed; {}; {}", style.get(), piece_div_style)>
                     {piece_str}
@@ -277,9 +294,6 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
 
             file_ = file_.wrapping_add_signed(1);
         }
-
-        // TODO create_effect that calls some function on each mt_og which 1) flips its position
-        // and 2) correct the update function
 
         board_view.push(view! { <tr>{row_view}</tr> });
         rank = rank.wrapping_add_signed(-1);
@@ -295,22 +309,34 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
     }
 }
 
-fn get_board_idxs_from_position(position: Position) -> BoardIdxs {
+// TODO these 3 functions should be grouped together in a mod or added the to the MoveTracker
+// struct
+fn flip_position(position: Position) -> Position {
+    Position {
+        x: 414.0 - position.x,
+        y: 378.0 - position.y,
+    }
+}
+
+fn get_board_idxs_from_position(mut position: Position, perspective: Color) -> BoardIdxs {
+    if perspective == Color::Black {
+        position = flip_position(position);
+    }
     let file_idx = (position.x as usize + 9) / 54;
     let rank_idx = BOARD_LEN - 1 - ((position.y as usize + 28) / 54);
     BoardIdxs(rank_idx, file_idx)
 }
 
-fn get_position_from_board_idxs(board_idxs: BoardIdxs) -> Position {
+fn get_position_from_board_idxs(board_idxs: BoardIdxs, perspective: Color) -> Position {
     let BoardIdxs(rank_idx, file_idx) = board_idxs;
-    Position {
+    let mut position = Position {
         x: 54.0 * (file_idx as f64) + 18.0,
         y: 54.0 * (BOARD_LEN - 1 - rank_idx) as f64,
+    };
+    if perspective == Color::Black {
+        position = flip_position(position);
     }
-}
-
-fn get_square_name_from_position(position: Position) -> String {
-    board_idxs_to_square_name(get_board_idxs_from_position(position))
+    position
 }
 
 mod board {
