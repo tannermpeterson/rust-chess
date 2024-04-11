@@ -99,16 +99,23 @@ struct PieceTracker {
     position: Position,
     perspective: Color,
     is_visible: bool,
+    set_visibility: WriteSignal<String>,
     update_fn: Option<WriteSignal<Position>>,
     moves: Option<HashMap<BoardIdxs, String>>,
 }
 
 impl PieceTracker {
-    pub fn new(piece_info: PieceInfo, position: Position, perspective: Color) -> PieceTracker {
+    pub fn new(
+        piece_info: PieceInfo,
+        position: Position,
+        perspective: Color,
+        set_visibility: WriteSignal<String>,
+    ) -> PieceTracker {
         PieceTracker {
             piece_info,
             position,
             perspective,
+            set_visibility,
             is_visible: true,
             update_fn: None,
             moves: None,
@@ -125,7 +132,6 @@ impl PieceTracker {
     }
 
     pub fn reset_position(&mut self) {
-        log!("!!!");
         if let Some(update_fn) = self.update_fn {
             update_fn(self.position);
         }
@@ -142,8 +148,10 @@ impl PieceTracker {
         self.perspective = perspective;
     }
 
-    pub fn visibility(&self) -> String {
-        String::from(if self.is_visible { "visible" } else { "hidden" })
+    pub fn set_visible(&mut self, is_visible: bool) {
+        self.is_visible = false;
+        self.set_visibility
+            .set(String::from(if is_visible { "visible" } else { "hidden" }));
     }
 }
 
@@ -204,11 +212,13 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                 "#000"
             };
             let piece_div_style = format!("color: {}; font-size: 60px; ", text_color);
+            let (visibility, set_visibility) = create_signal(String::from("visibility"));
 
             let pt_og = Rc::new(RefCell::new(PieceTracker::new(
                 piece_info,
                 get_position_from_board_idxs(BoardIdxs(rank, file_), perspective.get_untracked()),
                 perspective.get_untracked(),
+                set_visibility,
             )));
             let pt_clone_on_start = Rc::clone(&pt_og);
             let pt_clone_on_end = Rc::clone(&pt_og);
@@ -248,9 +258,6 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                     // TODO disallow dragging outside of board
                     .on_end(move |UseDraggableCallbackArgs { position, event }| {
                         let mut pt = pt_clone_on_end.borrow_mut();
-                        pt.reset_position();
-                        return;
-
                         let board_idxs = get_board_idxs_from_position(position, pt.perspective);
                         log!(format!(
                             "({}, {}), ({}, {})",
@@ -273,28 +280,40 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                                 };
 
                                 let mut board = board_clone_on_end.borrow_mut();
-                                let res = board.handle_move(move_, piece_color);
-                                if let Err(e) = res {
-                                    log!(format!("{}", e));
-                                    pt.reset_position();
-                                    return;
-                                }
+                                // TODO need to check the previous move on board instead of using
+                                // this return so that the promotion value can be obtained
+                                let res = match board.handle_move(move_, piece_color) {
+                                    Err(e) => {
+                                        log!(format!("{}", e));
+                                        pt.reset_position();
+                                        return;
+                                    }
+                                    Ok(res) => res,
+                                };
                                 let new_pos =
                                     get_position_from_board_idxs(board_idxs, pt.perspective);
 
                                 // update any other pieces that may have been affected by this move
-                                if let Some(capture_idxs) = &res.unwrap().capture_idxs {
-                                    for pt_ in pts_clone_on_end.borrow().iter() {
-                                        let mut pt_ = match pt_.try_borrow_mut() {
-                                            Err(_) => continue,
-                                            Ok(pt_) => pt_,
-                                        };
-                                        if get_board_idxs_from_position(pt.position, pt.perspective)
-                                            == *capture_idxs
-                                        {
-                                            pt_.is_visible = false;
-                                            break;
-                                        }
+                                let idxs_to_check_for_capture =
+                                    if let Some(capture_idxs) = &res.capture_idxs {
+                                        capture_idxs
+                                    } else {
+                                        &res.target_idxs
+                                    };
+
+                                for pt_ in pts_clone_on_end.borrow().iter() {
+                                    let mut pt_ = match pt_.try_borrow_mut() {
+                                        Err(_) => continue,
+                                        Ok(pt_) => pt_,
+                                    };
+                                    if pt_.is_visible
+                                        && get_board_idxs_from_position(
+                                            pt_.position,
+                                            pt_.perspective,
+                                        ) == *idxs_to_check_for_capture
+                                    {
+                                        pt_.set_visible(false);
+                                        break;
                                     }
                                 }
 
@@ -309,15 +328,14 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                         }
                     }),
             );
-            pt_og.borrow_mut().set_update_fn(set_position);
 
-            let pt_clone_view = Rc::clone(&pt_og);
             piece_view.push(view! {
-                <div node_ref=el style=move || format!("position: fixed; visibility: {}; {}; {};", pt_clone_view.borrow().visibility(), style(), piece_div_style)>
+                <div node_ref=el style=move || format!("position: fixed; visibility: {}; {}; {};", visibility() , style(), piece_div_style)>
                     {piece_str}
                 </div>
             });
 
+            pt_og.borrow_mut().set_update_fn(set_position);
             piece_trackers.borrow_mut().push(pt_og);
 
             file_ = file_.wrapping_add_signed(1);
