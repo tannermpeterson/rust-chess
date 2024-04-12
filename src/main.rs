@@ -19,10 +19,10 @@ fn main() {
 
     let use_leptos = true;
     if use_leptos {
-        let board = Board::new(&promote_leptos);
+        let board = Board::new(promote_leptos);
         run_game_leptos(user_color, board);
     } else {
-        let board = Board::new(&promote_text_based);
+        let board = Board::new(promote_text_based);
         run_game_text_based(user_color, board);
     }
 }
@@ -482,12 +482,12 @@ mod board {
     pub struct Board {
         pub squares: BoardArr,
         pub moves: Vec<MoveRecord>,
-        promote: &'static dyn Fn() -> Pieces,
+        promote: fn() -> Pieces,
         king_idxs: HashMap<Color, BoardIdxs>,
     }
 
     impl Board {
-        pub fn new(promote: &'static dyn Fn() -> Pieces) -> Board {
+        pub fn new(promote: fn() -> Pieces) -> Board {
             Board {
                 // element [0][0] is a1
                 squares: [
