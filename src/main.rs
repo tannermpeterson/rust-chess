@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 fn main() {
-    let user_color: Color = if true /* rand::random() */ {
+    let user_color: Color = if rand::random() {
         Color::White
     } else {
         Color::Black
@@ -39,7 +39,7 @@ fn run_game_text_based(user_color: Color, mut board: Board) {
             .read_line(&mut move_string)
             .expect("Failed to read line");
 
-        let move_ = match parse_move(move_string, user_color) {
+        let move_ = match parse_move(&move_string, user_color) {
             Ok(move_) => move_,
             Err(e) => {
                 println!("{e}");
@@ -265,12 +265,12 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                         ));
 
                         if let Some(moves) = pt.moves.as_ref() {
-                            if let Some(move_string) = moves.get(&board_idxs).clone() {
-                                log!(move_string.clone());
+                            if let Some(move_string) = moves.get(&board_idxs) {
+                                log!(move_string);
 
                                 let piece_color = pt.piece_info.color;
 
-                                let move_ = match parse_move(move_string.to_owned(), piece_color) {
+                                let move_ = match parse_move(move_string, piece_color) {
                                     Ok(move_) => move_,
                                     Err(e) => {
                                         log!(format!("{}", e));
@@ -300,6 +300,7 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
                                     } else {
                                         &res.target_idxs
                                     };
+                                // TODO update rook's pos if castling
 
                                 for pt_ in pts_clone_on_end.borrow().iter() {
                                     let mut pt_ = match pt_.try_borrow_mut() {
@@ -345,6 +346,7 @@ fn BoardView(board: Board, perspective: ReadSignal<Color>) -> impl IntoView {
         rank = rank.wrapping_add_signed(-1);
     }
 
+    // flip the pos of every piece when the perspective is flipped
     create_effect(move |_| {
         piece_trackers.borrow().iter().for_each(|pt| {
             pt.borrow_mut().set_perspective(perspective());
@@ -427,6 +429,7 @@ mod board {
         pub rank: u8,
     }
 
+    // TODO try making this not copy
     #[derive(Debug, Copy, Clone)]
     pub struct PieceInfo {
         pub piece: Pieces,
@@ -689,9 +692,14 @@ mod board {
             });
 
             // make sure king and rook are in their original positions and have not moved
-            for starting_file_idx in [king_starting_file_idx, rook_starting_file_idx].into_iter() {
+            for (starting_file_idx, piece) in [
+                (king_starting_file_idx, Pieces::K),
+                (rook_starting_file_idx, Pieces::R),
+            ]
+            .into_iter()
+            {
                 if let Some(piece_info) = &self.squares[starting_rank_idx][starting_file_idx] {
-                    if piece_info.piece != Pieces::K {
+                    if piece_info.piece != piece {
                         return Err(MoveErrors::NoPieceToMakeMove);
                     }
                     if piece_info.move_count != 0 {
@@ -912,10 +920,10 @@ mod board {
                                     // en passant
                                     if other_piece_info.piece == Pieces::P
                                         && other_piece_info.move_count == 1
+                                        && is_en_passantable_rank_idx(prev_rank_idx, color)
                                         && self.prev_move_target_idxs().is_some_and(|ti| {
                                             *ti == BoardIdxs(prev_rank_idx, target_file_idx)
                                         })
-                                    // TODO need to make sure this piece is on the correct rank
                                     {
                                         Ok(MoveIdxs {
                                             starting_idxs: BoardIdxs(
@@ -993,7 +1001,7 @@ mod board {
             }
         }
 
-        // TODO this should probably return a result instead of an empty hasmap
+        // TODO this should probably return a result instead of an empty hashmap
         pub fn get_moves_for_piece_at(&self, board_idxs: BoardIdxs) -> HashMap<BoardIdxs, String> {
             let BoardIdxs(rank_idx, file_idx) = board_idxs;
 
@@ -1017,7 +1025,7 @@ mod board {
 
                     if self.squares[next_rank_idx][file_idx].is_none() {
                         let idxs = BoardIdxs(next_rank_idx, file_idx);
-                        let move_str = board_idxs_to_square_name(idxs.clone());
+                        let move_str = board_idxs_to_square_name(&idxs);
                         moves.insert(idxs, move_str);
 
                         // not checking if this is on the opponent's back rank because the pawn
@@ -1027,7 +1035,7 @@ mod board {
                             && self.squares[next_next_rank_idx][file_idx].is_none()
                         {
                             let idxs = BoardIdxs(next_next_rank_idx, file_idx);
-                            let move_str = board_idxs_to_square_name(idxs.clone());
+                            let move_str = board_idxs_to_square_name(&idxs);
                             moves.insert(idxs, move_str);
                         }
                     }
@@ -1055,7 +1063,7 @@ mod board {
                             ))
                         {
                             let idxs = BoardIdxs(next_rank_idx, other_file_idx);
-                            let target_square_name = board_idxs_to_square_name(idxs.clone());
+                            let target_square_name = board_idxs_to_square_name(&idxs);
                             let current_file = idx_to_file(file_idx);
                             let move_str = format!("{}{}", current_file, target_square_name);
                             moves.insert(idxs, move_str);
@@ -1074,9 +1082,9 @@ mod board {
                     };
 
                     // TODO just make this a regular function on the board struct and take the
-                    // piece as an arg instead of doing this move
+                    // piece as an arg instead of doing this closure
                     let move_str_start = piece.to_string();
-                    let create_move_str = move |idxs| {
+                    let create_move_str = |idxs: &BoardIdxs| {
                         let target_square_name = board_idxs_to_square_name(idxs);
                         format!("{}{}", move_str_start, target_square_name)
                     };
@@ -1088,15 +1096,16 @@ mod board {
                         );
                         while rank_idx_iter < BOARD_LEN && file_idx_iter < BOARD_LEN {
                             let idxs = BoardIdxs(rank_idx_iter, file_idx_iter);
+                            let move_str = create_move_str(&idxs);
                             if let Some(other_piece_info) =
                                 &self.squares[rank_idx_iter][file_idx_iter]
                             {
                                 if other_piece_info.color != piece_info.color {
-                                    moves.insert(idxs.clone(), create_move_str(idxs));
+                                    moves.insert(idxs, move_str);
                                 }
                                 break;
                             }
-                            moves.insert(idxs.clone(), create_move_str(idxs));
+                            moves.insert(idxs, move_str);
 
                             if !endless {
                                 break;
@@ -1108,7 +1117,22 @@ mod board {
                     }
                     // TODO if the piece is not a king, check to see if there is another piece of the
                     // same type that could move to this square and if so, add a disambiguator
-                    // TODO if the piece is the king, check castling
+
+                    if piece == Pieces::K {
+                        if self
+                            .is_legal_castle(&CastleDirection::Short, piece_info.color)
+                            .is_ok()
+                        {
+                            moves.insert(BoardIdxs(rank_idx, file_to_idx('g')), "O-O".to_string());
+                        }
+                        if self
+                            .is_legal_castle(&CastleDirection::Long, piece_info.color)
+                            .is_ok()
+                        {
+                            moves
+                                .insert(BoardIdxs(rank_idx, file_to_idx('c')), "O-O-O".to_string());
+                        }
+                    }
                 }
             }
 
@@ -1196,7 +1220,7 @@ mod board {
         (-1, -1),
     ];
 
-    pub fn parse_move(move_string: String, color: Color) -> Result<Move, MoveErrors> {
+    pub fn parse_move(move_string: &str, color: Color) -> Result<Move, MoveErrors> {
         let move_chars: Vec<char> = move_string.trim().chars().collect();
         let move_len = move_chars.len();
 
@@ -1295,8 +1319,8 @@ mod board {
         char::from_u32(('a' as u32) + (idx as u32)).unwrap_or_else(|| 'x')
     }
 
-    pub fn board_idxs_to_square_name(board_idxs: BoardIdxs) -> String {
-        let BoardIdxs(rank_idx, file_idx) = board_idxs;
+    pub fn board_idxs_to_square_name(board_idxs: &BoardIdxs) -> String {
+        let BoardIdxs(rank_idx, file_idx) = *board_idxs;
         let rank = rank_idx + 1;
         let file_ = idx_to_file(file_idx);
         String::from(format!("{}{}", file_, rank))
@@ -1325,7 +1349,7 @@ mod tests {
 
     #[test]
     fn parse_move__single_possible_piece() {
-        let result = parse_move(String::from("Bb1"), Color::White).unwrap();
+        let result = parse_move("Bb1", Color::White).unwrap();
 
         match_and_run!(result, Move::Standard, |move_: SinglePieceMove| {
             assert_eq!(move_.piece_info.piece, Pieces::B);
@@ -1337,7 +1361,7 @@ mod tests {
 
     #[test]
     fn parse_move__multiple_possible_pieces__file_included() {
-        let result = parse_move(String::from("Nce4"), Color::White).unwrap();
+        let result = parse_move("Nce4", Color::White).unwrap();
 
         match_and_run!(result, Move::Standard, |move_: SinglePieceMove| {
             assert_eq!(move_.piece_info.piece, Pieces::N);
